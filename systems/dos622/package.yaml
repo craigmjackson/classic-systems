@@ -1,0 +1,18 @@
+name: dos622
+description: MS-DOS 6.22
+qemu:
+  binary: qemu-system-x86_64.exe
+  machine: pc
+  cpus: 1
+  memory_mb: 64
+  boot_order: ac
+  qmp_port: 4444
+  drives:
+  - interface: ide
+    file: dos622_c.img
+    size: 2048M
+network:
+  nic: ne2k_pci
+  smb_dir: share
+  smb_name: HOST
+  smb_port: 139
