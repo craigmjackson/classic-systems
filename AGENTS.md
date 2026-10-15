@@ -9,15 +9,15 @@ directory `systems/dos622/share/` appears as `F:` inside the guest.
 
 | File | Role |
 |------|------|
-| `install.py` | Downloads the latest `qemu-w64-setup-*.exe` from `qemu.weilnetz.de/w64/` and extracts it into `deps/qemu/AMD64/` |
-| `start.py` | Loads `systems/<name>/package.yaml`, launches an SMB host server, builds a QEMU command, runs QEMU, then terminates the server. Usage: `python start.py [system]` |
+| `install.py` | Installs all dependencies: downloads QEMU from `qemu.weilnetz.de/w64/`, MS Network Client from `archive.org/msnc3`, RTL8029 driver from `archive.org/pcind.dos` (and builds `pcind.img`), creates the blank 2 GB C: drive via `qemu-img`, seeds `share/HELLO.TXT`. Exposes an importable `ensure_all(system_dir)` function that `start.py` calls. Also provides `--check` (report-only) and `--qemu-only` (legacy) CLI modes. |
+| `start.py` | Loads `systems/<name>/package.yaml`, auto-runs `install.ensure_all()` (unless `--skip-deps`), launches the SMB host server, builds the QEMU command, runs QEMU (blocking), then tears down the server. Usage: `python start.py [system] [--skip-deps]` |
 | `floppy.py` | Runtime floppy control via QMP (port from `qemu.qmp_port`). Usage: `python floppy.py <system> eject`, `... insert <img>`, `... query` |
-| `smb_host.py` | Stdlib-only SMB1 server (supports both NT LM 0.12 and DOS LANMAN dialects; PCnet/RTL8029 NDIS2-driver compatible). Logs every request. Launched as a child of `start.py` |
+| `smb_host.py` | Stdlib-only SMB1 server (supports both NT LM 0.12 and DOS LANMAN dialects; PCnet/RTL8029 NDIS2-driver compatible). Logs every request. Launched as a child of `start.py` on `127.0.0.1:139`. |
 | `systems/dos622/package.yaml` | Spec for the MS-DOS 6.22 system |
-| `systems/dos622/dos622_{1..4}.img` | MS-DOS 6.22 setup floppy images (from a 1994 retail set) |
-| `systems/dos622/dos622_c.img` | 2 GB raw FAT16 C: drive |
-| `systems/dos622/msclient/` | MS Network Client 3.0b disks + RTL8029 OEM driver + bootstrap floppies (`config.img`, `swapnet.img`, `pcind.img`) |
-| `systems/dos622/share/` | Host-side folder exposed as guest `F:` |
+| `systems/dos622/dos622_{1..4}.img` | MS-DOS 6.22 setup floppy images — **user-provided**, not auto-downloaded (copyrighted retail media) |
+| `systems/dos622/dos622_c.img` | 2 GB raw FAT16 C: drive (auto-created by `install.py`) |
+| `systems/dos622/msclient/` | Auto-populated by `install.py`: `Disk1.img`, `Disk2.img` (MSN 3.0b), `pcind.img` (RTL8029 NDIS2 driver floppy). Also contains two manual recovery floppies: `config.img` (static IP + LMHOSTS), `swapnet.img` (driver + PROTOCOL.INI patcher) — not auto-generated. |
+| `systems/dos622/share/` | Host-side folder exposed as guest `F:`; auto-seeded with `HELLO.TXT` by `install.py` |
 | `systems/dos622/smb_host.log` | Server request log (append-only) |
 
 ## package.yaml schema
@@ -142,8 +142,8 @@ network:
 
 ### External sources (reproducible)
 
-- MS Network Client 3.0b (2 floppy images): archive.org item **`msnc3`** → `Disk1.img`, `Disk2.img`.
-- RTL8029 NDIS2 driver: archive.org item **`pcind.dos`** → `RTL8029_Ndis2_v2.20.zip` (contains `DOS/PCIND.DOS`, `DOS/RTL8029.NIF`, `DOS/OEMSETUP.INF`).
+- MS Network Client 3.0b (2 floppy images): archive.org item **`msnc3`** → `https://archive.org/download/msnc3/Disk1.img`, `.../Disk2.img`.
+- RTL8029 NDIS2 driver: archive.org item **`pcind.dos`** → `https://archive.org/download/pcind.dos/RTL8029_Ndis2_v2.20.zip` (contains `DOS/PCIND.DOS`, `DOS/RTL8029.NIF`, `DOS/OEMSETUP.INF`; extracted and built into `pcind.img` by `install.py`).
 - QEMU Windows binaries: `https://qemu.weilnetz.de/w64/` (latest `qemu-w64-setup-<date>.exe`).
 - These are NOT committed to the repo (images are ~1.5 MB each, driver zip is 15 KB, QEMU is ~250 MB).
 
@@ -183,6 +183,7 @@ C:\>
 ## TODO / future polish
 
 - Automate MS Client setup end-to-end (was interactive this round; UNATTEND.TXT for 3.0b is undocumented — scripted sendkey with screenshot checkpoints is the most reliable path).
-- Move `systems/dos622/msclient/*.img` to a dedicated bootstrap dir if the set grows.
 - Add a `.gitignore` for `*.log`, `__pycache__/`, `deps/qemu/`, and the 2 GB `dos622_c.img` (user may want to keep it outside repo).
 - Consider adding a `-display none` flag to `start.py` for headless automation.
+- Consider auto-detecting when `smb_host.py` crashes (Defender quarantine, missing port) and surfacing a clearer error than "connection refused".
+- Factor `check_deps()` / `ensure_all()` so new systems (e.g. Win3.1, FreeDOS) can declare their own deps in `package.yaml` instead of being hard-coded to `dos622`.
