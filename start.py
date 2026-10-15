@@ -7,6 +7,8 @@ import time
 
 import yaml
 
+import install as _install
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SYSTEMS_DIR = os.path.join(ROOT, "systems")
 QEMU_DIR = os.path.join(ROOT, "deps", "qemu", "AMD64")
@@ -100,6 +102,11 @@ def build_command(name, pkg):
 def main():
     parser = argparse.ArgumentParser(description="Start a configured system in QEMU.")
     parser.add_argument("system", nargs="?", help="system name (omit to list systems)")
+    parser.add_argument(
+        "--skip-deps",
+        action="store_true",
+        help="Don't auto-install missing dependencies (assumes install.py was run).",
+    )
     args = parser.parse_args()
 
     systems = discover_systems()
@@ -114,6 +121,20 @@ def main():
 
     if args.system not in systems:
         sys.exit(f"ERROR: unknown system '{args.system}'. Available: {', '.join(systems) or 'none'}")
+
+    system_dir = os.path.join(SYSTEMS_DIR, args.system)
+
+    if not args.skip_deps:
+        try:
+            deps_ok = _install.ensure_all(system_dir, verbose=True)
+            if not deps_ok:
+                print(
+                    "\nNote: DOS 6.22 setup floppies are missing — "
+                    "boot will fall through to the hard disk.\n"
+                )
+        except Exception as e:
+            print(f"Warning: dependency check failed: {e}")
+            print("Continuing anyway. You may need to run `python install.py` manually.\n")
 
     pkg = load_package(args.system)
     cmd = build_command(args.system, pkg)
