@@ -84,6 +84,73 @@ no floppy drive is configured. SeaBIOS falls through to the HDD in that case.
 
 Run `python start.py` with no argument to list available systems.
 
+## package.yaml schema
+
+Each system is described by a `systems/<name>/package.yaml` file. `start.py`
+reads it to build the QEMU command line; `install.py` uses it to find the
+system directory and seed the share.
+
+```yaml
+name: dos622                   # system identifier (matches directory name)
+description: MS-DOS 6.22       # human-readable label
+
+qemu:
+  binary: qemu-system-x86_64.exe   # QEMU binary in deps/qemu/AMD64/
+  machine: pc                     # QEMU -machine value
+  cpus: 1                         # -smp value (MS-DOS: use 1)
+  memory_mb: 64                   # -m value (MS-DOS max ~64 MB via HIMEM)
+  boot_order: ac                  # SeaBIOS -boot order=... ('ac' = A: then C:)
+                                  # 'a'/'b' are stripped automatically when no
+                                  # floppy drive is configured
+  qmp_port: 4444                  # TCP port for QMP (floppy.py, automation)
+  drives:                         # ordered list; first floppy entry = boot disk
+    - interface: floppy           #   -fda/-fdb <file>
+      device: fda                 #   fda (drive A:) or fdb (drive B:)
+      file: dos622_1.img          #   relative to systems/<name>/
+    - interface: ide              #   -drive if=ide,index=N,media=disk,file=<file>
+      file: dos622_c.img          #   auto-created by install.py if missing
+      size: 2048M                 #   raw disk size (qemu-img create)
+  args: []                        # extra args appended verbatim (e.g. -display none)
+
+network:
+  nic: ne2k_pci                   # QEMU NIC device name (ms$ne2clone on ne2k_isa
+                                  # truncates TX at 60 bytes — use ne2k_pci +
+                                  # PCIND.DOS)
+  smb_dir: share                  # host folder relative to systems/<name>/
+  smb_name: HOST                  # share name on the wire (\\SMBSERVER\HOST)
+  smb_port: 139                   # host TCP port the SMB server binds (loopback)
+```
+
+### Field reference
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `name` | yes | — | System identifier; must match the directory name |
+| `description` | no | — | Human-readable label |
+| `qemu.binary` | no | `qemu-system-x86_64.exe` | QEMU executable in `deps/qemu/AMD64/` |
+| `qemu.machine` | no | — | `-machine` value |
+| `qemu.cpus` | no | — | `-smp` value |
+| `qemu.memory_mb` | no | — | `-m` value (guest RAM in MB) |
+| `qemu.boot_order` | no | — | SeaBIOS `-boot order=` string; 'a'/'b' auto-stripped when no floppy drive present |
+| `qemu.qmp_port` | no | — | TCP port for QMP (used by `floppy.py`) |
+| `qemu.drives` | yes | — | Ordered drive list. First floppy entry = boot floppy. IDE disks auto-created via `qemu-img` |
+| `qemu.drives[].interface` | yes | — | `floppy` or `ide` |
+| `qemu.drives[].file` | yes | — | image filename, relative to `systems/<name>/` |
+| `qemu.drives[].device` | no | `fda` | floppy device name (`fda` or `fdb`) |
+| `qemu.drives[].size` | no | `2048M` | raw disk size (only meaningful for `ide`) |
+| `qemu.args` | no | `[]` | extra args appended verbatim to the QEMU command |
+| `network.nic` | no | — | QEMU NIC device name (e.g. `ne2k_pci`) |
+| `network.smb_dir` | no | — | host folder to expose (relative to `systems/<name>/`) |
+| `network.smb_name` | no | `HOST` | share name on the wire |
+| `network.smb_port` | no | `139` | host TCP port for the SMB server (loopback) |
+
+### Notes
+
+- If no floppy drive is listed in `drives`, `start.py` still attaches an empty
+  `-fda ""` so `floppy.py insert` works at runtime.
+- `qmp_port` and `smb_port` must not collide with other running instances.
+- DOS 6.22 limits: 1 CPU, 64 MB RAM (HIMEM.SYS max), 2 GB disk (FAT16/FDISK max).
+
 ## What install.py does
 
 | Dependency | Source | Size | Auto-download |
