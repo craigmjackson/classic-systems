@@ -11,7 +11,7 @@ directory `systems/dos622/share/` appears as `F:` inside the guest.
 |------|------|
 | `install.py` | Installs all dependencies: downloads QEMU from `qemu.weilnetz.de/w64/`, MS Network Client from `archive.org/msnc3`, RTL8029 driver from `archive.org/pcind.dos` (and builds `pcind.img`), creates the blank 2 GB C: drive via `qemu-img`, seeds `share/HELLO.TXT`. Exposes an importable `ensure_all(system_dir)` function that `start.py` calls. Also provides `--check` (report-only) and `--qemu-only` (legacy) CLI modes. |
 | `start.py` | Loads `systems/<name>/package.yaml`, auto-runs `install.ensure_all()` (unless `--skip-deps`), launches the SMB host server, builds the QEMU command, runs QEMU (blocking), then tears down the server. Usage: `python start.py [system] [--skip-deps]` |
-| `floppy.py` | Runtime floppy control via QMP (port from `qemu.qmp_port`). Usage: `python floppy.py <system> eject`, `... insert <img>`, `... query` |
+| `floppy.py` | Runtime floppy control via QMP (port from `qemu.qmp_port`). Usage: `python floppy.py <system> eject`, `... insert <img>`, `... query`. `eject`/`insert` fall back to editing `package.yaml` alone when no VM/QMP is listening; `query` still requires a running VM. |
 | `smb_host.py` | Stdlib-only SMB1 server (supports both NT LM 0.12 and DOS LANMAN dialects; PCnet/RTL8029 NDIS2-driver compatible). Logs every request. Launched as a child of `start.py` on `127.0.0.1:139`. |
 | `systems/dos622/package.yaml` | Spec for the MS-DOS 6.22 system |
 | `systems/dos622/dos622_{1..4}.img` | MS-DOS 6.22 setup floppy images — **user-provided**, not auto-downloaded (copyrighted retail media) |

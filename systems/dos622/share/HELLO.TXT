@@ -1,0 +1,2 @@
+Hello from the Windows host filesystem!
+If you can read this in DOS as F:\HELLO.TXT, the SMB share works.

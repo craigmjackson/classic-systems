@@ -53,7 +53,17 @@ def build_command(name, pkg):
     if qemu.get("memory_mb"):
         cmd += ["-m", str(qemu["memory_mb"])]
     drives = qemu.get("drives", [])
-    has_floppy = any(d.get("interface") == "floppy" for d in drives)
+    usable_drives = []
+    for d in drives:
+        if d.get("interface") == "floppy" and not os.path.isfile(
+            os.path.join(system_dir, d["file"])
+        ):
+            print(
+                f"Warning: floppy image {d['file']} not found — skipping (boot falls through to HDD)."
+            )
+            continue
+        usable_drives.append(d)
+    has_floppy = any(d.get("interface") == "floppy" for d in usable_drives)
     boot_order = qemu.get("boot_order")
     if boot_order and not has_floppy:
         boot_order = "".join(c for c in boot_order if c not in "ab")
@@ -64,7 +74,7 @@ def build_command(name, pkg):
 
     ide_index = 0
     floppy_present = False
-    for drive in drives:
+    for drive in usable_drives:
         image = os.path.join(system_dir, drive["file"])
         interface = drive.get("interface", "ide")
         if interface == "floppy":

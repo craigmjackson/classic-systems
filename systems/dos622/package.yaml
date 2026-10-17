@@ -8,6 +8,9 @@ qemu:
   boot_order: ac
   qmp_port: 4444
   drives:
+  - interface: floppy
+    device: fda
+    file: dos622_1.img
   - interface: ide
     file: dos622_c.img
     size: 2048M

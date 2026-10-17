@@ -37,10 +37,27 @@ def remove_floppy_from_package(name, pkg):
     return True
 
 
-def add_floppy_to_package(name, pkg, image):
+def resolve_image(system, image):
+    """Return (absolute_path, package_record) for an insert target, or exit."""
+    path = os.path.abspath(os.path.join(SYSTEMS_DIR, system, image))
+    if not os.path.isfile(path):
+        sys.exit(f"ERROR: image not found: {path}")
+    system_dir = os.path.join(SYSTEMS_DIR, system)
+    rel = os.path.relpath(path, system_dir)
+    record = path if rel.startswith("..") else rel.replace(os.sep, "/")
+    return path, record
+
+
+def set_floppy_in_package(name, pkg, image):
+    """Record ``image`` as the floppy drive in package.yaml (add or update)."""
     drives = pkg.get("qemu", {}).get("drives", [])
-    if any(d.get("interface") == "floppy" for d in drives):
-        return False
+    for drive in drives:
+        if drive.get("interface") == "floppy":
+            if drive.get("file") == image:
+                return False
+            drive["file"] = image
+            write_package(name, pkg)
+            return True
     pkg["qemu"]["drives"] = [{"interface": "floppy", "device": "fda", "file": image}] + drives
     write_package(name, pkg)
     return True
@@ -90,6 +107,21 @@ def main():
     try:
         qmp = Qmp("127.0.0.1", port)
     except OSError:
+        if args.command == "eject":
+            if remove_floppy_from_package(args.system, pkg):
+                print(f"VM not running — removed floppy entry from systems/{args.system}/package.yaml")
+            else:
+                print("VM not running and no floppy entry in package.yaml; nothing to do")
+            return
+        if args.command == "insert":
+            if not args.image:
+                sys.exit("ERROR: insert requires an image filename")
+            _, record = resolve_image(args.system, args.image)
+            if set_floppy_in_package(args.system, pkg, record):
+                print(f"VM not running — recorded {record} in systems/{args.system}/package.yaml")
+            else:
+                print(f"VM not running and floppy entry already set to {record}; nothing to do")
+            return
         sys.exit(f"ERROR: cannot connect to QMP on 127.0.0.1:{port}. Is the VM running?")
 
     if args.command == "eject":
@@ -100,10 +132,7 @@ def main():
         if not args.image:
             qmp.close()
             sys.exit("ERROR: insert requires an image filename")
-        path = os.path.abspath(os.path.join(SYSTEMS_DIR, args.system, args.image))
-        if not os.path.isfile(path):
-            qmp.close()
-            sys.exit(f"ERROR: image not found: {path}")
+        path, record = resolve_image(args.system, args.image)
         reply = qmp.send(
             {
                 "execute": "blockdev-change-medium",
@@ -111,11 +140,8 @@ def main():
             }
         )
         if "return" in reply:
-            system_dir = os.path.join(SYSTEMS_DIR, args.system)
-            rel = os.path.relpath(path, system_dir)
-            record = path if rel.startswith("..") else rel.replace(os.sep, "/")
-            if add_floppy_to_package(args.system, pkg, record):
-                print(f"Added floppy entry to systems/{args.system}/package.yaml")
+            if set_floppy_in_package(args.system, pkg, record):
+                print(f"Recorded {record} in systems/{args.system}/package.yaml")
     else:
         reply = qmp.send({"execute": "query-block"})
 

@@ -1,2 +1,4 @@
 *.img
 *.log
+__pycache__/
+deps/

@@ -62,19 +62,29 @@ Files you drop into `systems/dos622/share/` (via Explorer, `copy`, etc.)
 appear on `F:` the next time DOS reads the directory. Files created by the
 guest appear on the host immediately (the server flushes writes).
 
-## Hot-swapping floppies
+## Installing DOS & hot-swapping floppies
 
-The repo ships with the four MS-DOS 6.22 setup floppies and the MS Network
-Client 3.0b disks. Insert and eject at runtime:
+`package.yaml` ships with `dos622_1.img` in drive A: and `boot_order: ac`, so
+a fresh install boots the DOS 6.22 Setup floppy first (the 4-floppy set is
+user-provided — see "What install.py does"). After setup finishes:
+
+```
+python floppy.py dos622 eject                       # eject drive A:
+```
+
+This ejects the disk and strips the floppy entry from `package.yaml`, so the
+next `start.py` launch boots straight from the hard disk.
+
+Both `eject` and `insert` work when no VM is running — they just edit
+`package.yaml` directly (there's no live media to change). `insert` records
+the image so the next boot has it in drive A:. Only `query` requires a
+running VM. Re-insert any image
+at runtime:
 
 ```
 python floppy.py dos622 insert msclient/Disk1.img   # into drive A:
-python floppy.py dos622 eject                       # eject drive A:
 python floppy.py dos622 query                       # dump block devices (debug)
 ```
-
-The floppy device is always present in the machine; it just starts empty when
-no floppy drive is configured. SeaBIOS falls through to the HDD in that case.
 
 ## Adding a new system
 
