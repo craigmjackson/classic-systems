@@ -7,6 +7,10 @@ Windows; they show up in DOS instantly, and vice versa.
 ## Prerequisites
 
 - Windows 10 / 11, **Python 3.11+**
+- **MS-DOS 6.22 setup floppies — user-provided.** They are copyrighted
+  retail media and are **not** included with this project or auto-downloaded;
+  obtain them from your own disks or a legally-acquired ISO (see
+  "What install.py does")
 - ~2.5 GB free for QEMU (~250 MB) + 2 GB disk image + network client (~3 MB)
 - `PyYAML` — install once: `python -m pip install pyyaml`
 - Internet connection on first run (installs download QEMU + network stack)
@@ -20,10 +24,18 @@ python start.py dos622      # auto-installs missing deps, then boots
 On first run this downloads ~250 MB of QEMU binaries plus ~3 MB of DOS
 networking files. Subsequent runs skip the downloads.
 
+What it does **not** download is MS-DOS itself. On a fresh checkout there is
+no bootable disk yet, so you must provide the DOS 6.22 setup floppies
+yourself: place `dos622_1.img`–`dos622_4.img` in `systems/dos622/`, let
+DOS Setup run once from drive A:, then install networking with
+`python setup_net.py dos622` (see "Installing the network stack"). An
+already-installed `dos622_c.img` needs no floppies and boots straight to
+`C:\>` with `F:` mapped.
+
 For explicit control, run the installer separately:
 
 ```
-python install.py           # downloads everything (use --check to preview)
+python install.py           # downloads all auto-installable deps (use --check to preview)
 python start.py dos622      # boots the VM
 ```
 
@@ -64,9 +76,11 @@ guest appear on the host immediately (the server flushes writes).
 
 ## Installing DOS & hot-swapping floppies
 
-`package.yaml` ships with `dos622_1.img` in drive A: and `boot_order: ac`, so
-a fresh install boots the DOS 6.22 Setup floppy first (the 4-floppy set is
-user-provided — see "What install.py does"). After setup finishes:
+`package.yaml` points drive A: at `dos622_1.img` and sets `boot_order: ac`,
+so a fresh install boots the DOS 6.22 Setup floppy first. The 4-floppy set
+is user-provided copyrighted media — see "What install.py does"; if it is
+absent, `start.py` warns and skips the missing floppy so the boot falls
+through to the hard disk. After setup finishes:
 
 ```
 python floppy.py dos622 eject                       # eject drive A:
@@ -274,5 +288,6 @@ python setup_net.py dos622 --test    # offline network install + boot test
 - QEMU Windows builds: https://qemu.weilnetz.de/w64/ (Stefan Weil)
 - MS Network Client 3.0b: https://archive.org/details/msnc3 (Microsoft, 1994)
 - RTL8029 NDIS2 driver: https://archive.org/details/pcind.dos (Realtek, ~2000)
-- MS-DOS 6.22 setup disks: 4 × 1.44 MB images from a 1994 retail set
+- MS-DOS 6.22 setup disks: user-supplied 4 × 1.44 MB images from a 1994
+  retail set (not distributed with this project)
 - SMB1 wire format: Microsoft MS-CIFS spec [MS-CIFS]-250210
