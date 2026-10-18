@@ -545,7 +545,6 @@ class FatVolume:
 
 def build_configs(smb_name):
     autoexec = (
-        "C:\\DOS\\SMARTDRV.EXE /X\r\n"
         "@ECHO OFF\r\n"
         "PROMPT $p$g\r\n"
         "PATH C:\\DOS;C:\\NET\r\n"
@@ -566,8 +565,9 @@ def build_configs(smb_name):
         "DEVICE=C:\\DOS\\EMM386.EXE RAM\r\n"
         "DOS=HIGH,UMB\r\n"
         "FILES=30\r\n"
-        "device=C:\\NET\\ifshlp.sys\r\n"
-        "LASTDRIVE=Z\r\n"
+        "BUFFERS=10\r\n"
+        "DEVICEHIGH=C:\\NET\\ifshlp.sys\r\n"
+        "LASTDRIVE=F\r\n"
     )
     system_ini = (
         "[network]\r\n"

@@ -93,12 +93,13 @@ network:
   DEVICE=C:\DOS\EMM386.EXE RAM
   DOS=HIGH,UMB
   FILES=30
-  device=C:\NET\ifshlp.sys
-  LASTDRIVE=Z
+  BUFFERS=10
+  DEVICEHIGH=C:\NET\ifshlp.sys
+  LASTDRIVE=F
   ```
+  (`DEVICEHIGH=ifshlp` must come after EMM386 so UMBs exist; `SETVER` stays `DEVICE=` because it loads on line 1 before HIMEM/EMM386. `LASTDRIVE=F` is enough — only C: and F: are used; Z wastes ~2 KB on drive-letter tables G-Z.)
 - **AUTOEXEC order matters** (each step depends on the previous):
   ```
-  SMARTDRV.EXE /X
   net initialize         # PCIND driver banner
   netbind.com            # binds NDIS transports to NIC
   umb.com                # enables upper-memory block support
@@ -109,7 +110,8 @@ network:
   net start              # launches redirector (may show logon dialog)
   call c:\net\netmap.bat # last! maps F:
   ```
-  Do **not** use `LH` on these — UMB is already enabled by `DOS=HIGH,UMB` + `umb.com`; `LH netbind.com` actually **hangs** the boot on this configuration.
+  Do **not** use `LH` on any of these — empirically, `LH` on `netbind.com` **and** `tcptsr.exe` both hang the boot (MS Client internals assume conventional-memory load addresses). TINYRFC/EMSBFR/TCPDRV/NEMM already self-allocate into UMBs after loading low, so LH is redundant even where it doesn't hang. The one win: `DEVICEHIGH=C:\NET\ifshlp.sys` (4 KB → upper) and SMARTDRV is **not used at all** (QEMU's host caching makes it redundant; it cost ~12 KB conventional + 16 KB upper for zero benefit under QEMU).
+- **Largest executable program size is ~472 KB** with this stack (was 441 KB before dropping SMARTDRV, DEVICEHIGH=ifshlp, BUFFERS=10, LASTDRIVE=F). EMS stays fully available (EMM386 RAM). The remaining hogs are TCPTSR (42 KB) + REDIR (97 KB) — both need contiguous UMB space larger than the ~8 KB free block in the current UMA layout (SeaBIOS eats E000-FFFF, EMS page frame takes D000, only C800-CFFF ≈ 32 KB hole exists for UMBs, mostly filled by IFSHLP/REDIR's self-allocated upper portion). Fitting them would require `EMM386 NOEMS` (sacrifices EMS for games) — not worth it; 472 KB covers essentially all VGA-era titles.
 - `NETMAP.BAT` must be the LAST line. MS Client Setup rewrites AUTOEXEC on reinstall and may reorder appended lines.
 - Running `A:\SETUP` from a clean boot fails with "Setup has run out of memory." Workaround: boot with **F5** (bypasses CONFIG.SYS/AUTOEXEC), then run `A:\SETUP`. After Setup rewrites AUTOEXEC, re-apply the slimmed stack.
 - `net use f: \\SMBSERVER\HOST /persistent:no` in NETMAP.BAT avoids the "already in use" prompt when SYSTEM.INI's `reconnect=yes` pre-maps F: during `net start`.
@@ -204,6 +206,9 @@ network:
 - MSN's bundled `ms$ne2clone` NDIS2 driver on `ne2k_isa`: TX truncation at 60 bytes.
 - impacket SMB server: Defender quarantines `epm.py`, `__init__.py`, `DumpNTLMInfo.py` on install.
 - QEMU `filter-dump` on Windows occasionally truncates pcap `incl_len` to 60 while `orig_len` is larger; always read `orig_len`.
+- `LH` on MS Client TSRs: `netbind.com` and `tcptsr.exe` both hang the boot when loadhigh'd — keep the whole AUTOEXEC net stack low.
+- `pcind.dos=HIGH` in SYSTEM.INI: the driver loads high fine, but it grabs the big UMB chunk first and REDIR's self-allocated upper portion shrinks from 16 KB to 4 KB — net wash (~1 KB worse). Keep `pcind.dos=LOW`.
+- SMARTDRV under QEMU: redundant (host caches the raw image); cost 12 KB conventional + 16 KB upper for no benefit. Removed from AUTOEXEC.
 
 ## Boot sequence reference (current working DOS 6.22)
 
@@ -211,7 +216,6 @@ network:
 SeaBIOS → HDD
 Starting MS-DOS...
 HIMEM is testing extended memory...done.
-C:\>C:\DOS\SMARTDRV.EXE /X
 Loading PCI Ethernet Network Adapter ......... Network driver (U2.2) is installed
 Microsoft DOS TCP/IP Protocol Driver 1.0a
 Copyright (c) Microsoft Corporation, 1991.  All rights reserved.

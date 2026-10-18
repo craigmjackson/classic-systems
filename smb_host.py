@@ -908,7 +908,11 @@ class SmbConn(threading.Thread):
         fid = r["words"][0]
         kind, f, target = self.files.get(fid, (None, None, None))
         if f:
-            pos = f.seek(r["words"][1] | (r["words"][2] << 16), 0 if len(r["words"]) < 4 else r["words"][3])
+            # wc=1 degenerate SEEK (just FID) from DOS redirector EOF probes — treat as offset 0
+            if len(r["words"]) >= 3:
+                pos = f.seek(r["words"][1] | (r["words"][2] << 16), 0 if len(r["words"]) < 4 else r["words"][3])
+            else:
+                pos = f.seek(0, 1)
             self.send(self.reply(r, [pos & 0xFFFF, (pos >> 16) & 0xFFFF]))
         else:
             self.send(self.reply(r, [0, 0]))
