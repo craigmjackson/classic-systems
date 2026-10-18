@@ -791,9 +791,11 @@ class SmbConn(threading.Thread):
         open_mode = w[8] if len(w) > 8 else 0
         log(f"  open_andx path={path!r} target={target!r} access={access:#x} open_mode={open_mode:#x}")
         try:
-            if not os.path.exists(target) and (open_mode & 0x0003):
-                open(target, "ab").close()
             writable = bool(access & 0x0003) or bool(open_mode & 0x0002)
+            if not os.path.exists(target):
+                if not writable:
+                    return self.send(self.reply(r, [], status=NT_NAME_NOT_FOUND))
+                open(target, "ab").close()
             f = open(target, "r+b" if writable else "rb")
             if open_mode & 0x0002:
                 f.truncate(0)

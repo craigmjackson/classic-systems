@@ -86,6 +86,30 @@ python floppy.py dos622 insert msclient/Disk1.img   # into drive A:
 python floppy.py dos622 query                       # dump block devices (debug)
 ```
 
+## Installing the network stack (no guest SETUP needed)
+
+`setup_net.py` installs the complete MS Network Client stack **offline**,
+directly into `dos622_c.img` — no in-guest SETUP run, no unattended-answer
+file. It expands the install sources from `systems/dos622/msclient/`, writes
+36 files (C:\NET binaries, SYSTEM.INI, PROTOCOL.INI with static IP + RTL8029,
+AUTOEXEC/NETMAP boot lines, LMHOSTS/HOSTS, embedded WFWSYS.CFG + SHARES.PWL +
+DOS622.PWL), and cross-checks every file byte-for-byte after writing.
+
+```
+python setup_net.py dos622              # install (VM must be off)
+python setup_net.py dos622 --check      # report installed/not (exit 0/1)
+python setup_net.py dos622 --dry-run    # expand + plan, touch nothing
+python setup_net.py dos622 --force      # overwrite an existing stack
+python setup_net.py dos622 --test       # boot headless + verify F: end-to-end
+```
+
+`--test` boots the image with `-display none`, waits for the guest's
+NETMAP to map `F:` (detected via `smb_host.log`), then runs
+`copy c:\config.sys f:\zz.txt` in the guest and verifies the host file
+matches the image byte-for-byte. On success, `start.py dos622` boots
+straight to a `C:\>` prompt with `F:` mapped — logon is silent (the image
+ships a pre-made `DOS622.PWL`).
+
 ## Adding a new system
 
 1. Create `systems/<name>/package.yaml` — copy the `dos622` one and adjust.
@@ -185,8 +209,9 @@ your own disks or a legally-acquired ISO image. Boot works without them
 .
 ├── install.py          # downloads QEMU + MSN + RTL8029, creates C: drive + share/
 ├── start.py            # launches SMB server + QEMU (auto-calls install.ensure_all)
+├── setup_net.py        # offline MS Network Client install into dos622_c.img
 ├── floppy.py           # runtime floppy insert/eject via QMP
-── smb_host.py         # stdlib-only SMB1 server (host-side)
+├── smb_host.py         # stdlib-only SMB1 server (host-side)
 ├── deps/qemu/AMD64/    # QEMU binaries (created by install.py)
 └── systems/dos622/
     ├── package.yaml
@@ -210,6 +235,8 @@ python install.py --qemu-only  # legacy: only install QEMU
 python install.py --system-dir systems/dos622  # target a different system
 
 python start.py --skip-deps dos622   # bypass dep check (e.g. air-gapped)
+
+python setup_net.py dos622 --test    # offline network install + boot test
 ```
 
 ## Notes & gotchas

@@ -11,6 +11,7 @@ directory `systems/dos622/share/` appears as `F:` inside the guest.
 |------|------|
 | `install.py` | Installs all dependencies: downloads QEMU from `qemu.weilnetz.de/w64/`, MS Network Client from `archive.org/msnc3`, RTL8029 driver from `archive.org/pcind.dos` (and builds `pcind.img`), creates the blank 2 GB C: drive via `qemu-img`, seeds `share/HELLO.TXT`. Exposes an importable `ensure_all(system_dir)` function that `start.py` calls. Also provides `--check` (report-only) and `--qemu-only` (legacy) CLI modes. |
 | `start.py` | Loads `systems/<name>/package.yaml`, auto-runs `install.ensure_all()` (unless `--skip-deps`), launches the SMB host server, builds the QEMU command, runs QEMU (blocking), then tears down the server. Usage: `python start.py [system] [--skip-deps]` |
+| `setup_net.py` | Host-side offline installer of the full MS Network Client stack into `dos622_c.img` (extracts from `msclient/*.img`, writes 36 files incl. C:\NET binaries, SYSTEM.INI/PROTOCOL.INI/AUTOEXEC/NETMAP, embedded WFWSYS.CFG + SHARES.PWL + DOS622.PWL). No guest SETUP run needed. Usage: `python setup_net.py dos622 [--check|--dry-run|--force|--test]`. `--test` boots headless and verifies F: write end-to-end (waits for the guest's TREE_CONNECT in `smb_host.log`, then types `copy c:\config.sys f:\zz.txt` and compares host bytes). |
 | `floppy.py` | Runtime floppy control via QMP (port from `qemu.qmp_port`). Usage: `python floppy.py <system> eject`, `... insert <img>`, `... query`. `eject`/`insert` fall back to editing `package.yaml` alone when no VM/QMP is listening; `query` still requires a running VM. |
 | `smb_host.py` | Stdlib-only SMB1 server (supports both NT LM 0.12 and DOS LANMAN dialects; PCnet/RTL8029 NDIS2-driver compatible). Logs every request. Launched as a child of `start.py` on `127.0.0.1:139`. |
 | `systems/dos622/package.yaml` | Spec for the MS-DOS 6.22 system |
@@ -134,6 +135,55 @@ network:
 - `0x00` SMB_COM_CLOSE_AND_TREE_DISCONNECT: not required; client uses explicit `TREE_DISCONNECT` (0x71).
 - `0x03` SMB_COM_TREE_DISCONNECT: no params, no data, ack with empty response.
 
+### setup_net.py (offline network install) & headless logon
+
+- **`net start` logon prompt is the classic hang.** `autologon=yes` still shows
+  `Type your user name, or press ENTER if it is DOS622:` when no user password
+  list exists. Under `start.py` nobody presses ENTER → boot stalls inside
+  `net start`/`netmap` forever. Fix: ship `NET/DOS622.PWL` (606 bytes, user
+  DOS622, empty password, embedded as `DOS622_PWL_B64`) + SYSTEM.INI
+  `[Password Lists] DOS622=C:\NET\DOS622.PWL` → logon completes silently.
+  The client appends that `[Password Lists]` line itself when a PWL is created
+  interactively — `build_configs()` must match the image or `verify` fails
+  byte-exact (this exact mismatch happened: 527 vs 553 bytes).
+- **Interactive logon dance** (only if the embedded PWL is removed):
+  ENTER (accept DOS622), ENTER (blank password), `y` (create PWL), ENTER
+  (confirm blank), ENTER — with ≥3 s between keys; keys sent <1 s apart get
+  swallowed by the Y/N prompt transition.
+- **Orphan `smb_host.py` squatters kill every test invisibly.** A crashed
+  debug run can leave a stale `smb_host` holding `127.0.0.1:139` (Windows
+  SO_REUSEADDR allows a second LISTEN). The zombie accepts the guest's TCP
+  connection, sends nothing, never logs → every `net use` hangs with an empty
+  `smb_host.log`. Before any test: kill python processes whose CommandLine
+  matches `smb_host`, and verify `netstat -ano | findstr :139` shows only your
+  fresh child.
+- **`net use \\<ip>\<share>` gives fast Error 53** — the DOS redirector still
+  does NBNS resolution of the `<share>`'s computer name even with an IP
+  literal. Use the NetBIOS name (`\\smbserver\host`) resolved via the LMHOSTS
+  `#PRE` entry; that path connects fine (confirmed full NEGOTIATE→SESSION→
+  TREE_CONNECT→SEARCH→OPEN/WRITE traffic in `smb_host.log`).
+- **`smb_host.py cmd_2d` (OPEN_ANDX) must not create missing files on
+  read-only opens.** DOS COPY probes the target with a read open first; if the
+  server creates it there, COPY sees "exists" and stops at
+  `Overwrite F:\ZZ.TXT (Yes/No/All)?` (headless = hang, empty file left behind).
+  Create only when write intent is set (`access & 0x0003` or
+  `open_mode & 0x0002`); otherwise return `NT_NAME_NOT_FOUND` and let the
+  client's create path send the write open.
+- `run_test()` waits for `TREE_CONNECT` in `smb_host.log` (guest's NETMAP
+  mapped F:) before typing the probe. The old blind `sleep(40)` typed
+  `copy c:\config.sys f:\zz.txt` into the logon prompt (its chars became the
+  username / a stray `create password-list?` answer).
+- QMP `send-key` qcode gotchas: `colon` is **rejected** by QEMU 11 — send
+  `[{"qcode","shift"},{"qcode","semicolon"}]`; `.` is `dot`. Spacing keys
+  <0.12 s apart drops characters. PowerTip: inline `python -c` through
+  PowerShell mangles quotes — write debug scripts as .py files.
+- `IPCONFIG.EXE` requires an argument (`ipconfig c:\net`) and prints
+  `No DHCP data available` with `DisableDHCP=1` — that is **normal** for the
+  static config; `ping 10.0.2.2` succeeding proves the stack + slirp path.
+- PROTOCOL.INI space-separated octets (`IPAddress0=10 0 2 15`,
+  `SubNetMask0=255 255 255 0`, `DefaultGateway0=10 0 2 2`) are correct for
+  MS Client's TCPIP$ driver (verified by ping).
+
 ### FAT image surgery
 
 - The repo uses custom FAT12/FAT16 helpers (in the temp harness dir, `C:\Users\craig\AppData\Local\Temp\opencode\fatimg.py` and `rewrite_file.py`) for read-only inspection and byte-precise patches of `dos622_c.img`. They're not committed but are referenced by the implementation notes above.
@@ -180,9 +230,14 @@ The command completed successfully.
 C:\>
 ```
 
+Logon is **silent** now (embedded `DOS622.PWL`): no `Type your user name`
+prompt appears; NETMAP maps `F:` and returns to `C:\>` hands-free.
+
 ## TODO / future polish
 
-- Automate MS Client setup end-to-end (was interactive this round; UNATTEND.TXT for 3.0b is undocumented — scripted sendkey with screenshot checkpoints is the most reliable path).
+- ~~Automate MS Client setup end-to-end~~ — done: `setup_net.py` installs the
+  whole stack offline into the image (no guest SETUP, no UNATTEND.TXT needed);
+  `--test` verifies boot→F: write end-to-end.
 - Add a `.gitignore` for `*.log`, `__pycache__/`, `deps/qemu/`, and the 2 GB `dos622_c.img` (user may want to keep it outside repo).
 - Consider adding a `-display none` flag to `start.py` for headless automation.
 - Consider auto-detecting when `smb_host.py` crashes (Defender quarantine, missing port) and surfacing a clearer error than "connection refused".
