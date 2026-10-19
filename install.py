@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """Install / verify all dependencies for classic-systems.
 
-Downloads QEMU, MS Network Client 3.0b, and RTL8029 NDIS2 driver;
-creates the blank C: drive and share/ scaffolding. DOS 6.22 setup
-floppies are NOT auto-downloaded (copyrighted retail media) — place
-them manually in systems/<name>/.
+Downloads QEMU, MS Network Client 3.0b, RTL8029 NDIS2 driver, and the
+Open Watcom V2 + PDCurses toolchain; creates the blank C: drive, share/
+scaffolding, and builds the DOS menu launcher (MENU.EXE) plus the HELLO
+demo app. DOS 6.22 setup floppies are NOT auto-downloaded (copyrighted
+retail media) — place them manually in systems/<name>/.
 
 Usage:
     python install.py              # full install (default system: dos622)
     python install.py --check      # report missing deps without installing
     python install.py --qemu-only  # only install QEMU (legacy mode)
     python install.py --system-dir systems/dos622
+    python install.py --build-tools       # force (re)build MENU.EXE/HELLO.EXE
+    python install.py --reseed-hello      # force-recreate HELLO demo packages
 """
 
 import argparse
+import glob
 import io
 import os
 import re
@@ -21,6 +25,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.request
@@ -29,12 +34,22 @@ import zipfile
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEPS_DIR = os.path.join(ROOT, "deps", "qemu", "AMD64")
 SYSTEMS_DIR = os.path.join(ROOT, "systems")
+TOOLS_DIR = os.path.join(ROOT, "tools", "menu")
+WATCOM_DIR = os.path.join(ROOT, "deps", "watcom")
+WATCOM_TAR = os.path.join(ROOT, "deps", "ow-snapshot.tar.xz")
+PDCURSES_DIR = os.path.join(ROOT, "deps", "pdcurses")
+PDCURSES_ZIP = os.path.join(ROOT, "deps", "pdcurses-3.9.zip")
 
 # Download sources
 W64_INDEX_URL = "https://qemu.weilnetz.de/w64/"
 MSNC3_BASE_URL = "https://archive.org/download/msnc3"
 MSNC3_FILES = ["Disk1.img", "Disk2.img"]
 PCIND_ZIP_URL = "https://archive.org/download/pcind.dos/RTL8029_Ndis2_v2.20.zip"
+WATCOM_URL = (
+    "https://github.com/open-watcom/open-watcom-v2/releases"
+    "/download/Current-build/ow-snapshot.tar.xz"
+)
+PDCURSES_URL = "https://github.com/wmcbrine/PDCurses/archive/refs/tags/3.9.zip"
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; classic-systems-installer)"}
 
@@ -369,6 +384,254 @@ def ensure_share(system_dir, verbose=True):
 
 
 # ---------------------------------------------------------------------------
+# DOS toolchain (Open Watcom + PDCurses) and menu launcher
+# ---------------------------------------------------------------------------
+
+def have_watcom():
+    return os.path.isfile(os.path.join(WATCOM_DIR, "binnt64", "wcc.exe"))
+
+
+def ensure_watcom(verbose=True):
+    """Fetch the Open Watcom V2 snapshot tarball and extract it.
+
+    Same approach as the official open-watcom/setup-watcom GitHub
+    action: no installer, just extract ow-snapshot.tar.xz (the DOS
+    cross tools live in binnt64/, 16-bit libs in lib286/dos/).
+    """
+    if have_watcom():
+        if verbose:
+            _print("  Open Watcom: already installed.")
+        return
+    if verbose:
+        _print("  Open Watcom: downloading snapshot (~150 MB) ...")
+    os.makedirs(os.path.dirname(WATCOM_TAR), exist_ok=True)
+    _download(WATCOM_URL, WATCOM_TAR)
+    if verbose:
+        _print("  Open Watcom: extracting ...")
+    os.makedirs(WATCOM_DIR, exist_ok=True)
+    with tarfile.open(WATCOM_TAR, "r:xz") as tf:
+        for member in tf:
+            if member.issym() or member.islnk():
+                continue
+            name = member.name
+            while name.startswith("./"):
+                name = name[2:]
+            if not name or name == ".":
+                continue
+            member.name = name
+            try:
+                try:
+                    tf.extract(member, WATCOM_DIR, filter="tar")
+                except TypeError:  # Python < 3.12 has no filter=
+                    tf.extract(member, WATCOM_DIR)
+            except (OSError, ValueError):
+                continue
+    os.remove(WATCOM_TAR)
+    if not have_watcom():
+        sys.exit("ERROR: Open Watcom extraction failed (binnt64/wcc.exe missing).")
+    if verbose:
+        _print("  Open Watcom: installed.")
+
+
+def _watcom_tool(name):
+    """Absolute path to a Watcom host tool (CreateProcess ignores the
+    env= PATH when resolving the executable, so pass the full path)."""
+    for sub in ("binnt64", "binnt", "binw"):
+        p = os.path.join(WATCOM_DIR, sub, name + ".exe")
+        if os.path.isfile(p):
+            return p
+    return name + ".exe"
+
+
+def _watcom_env():
+    env = os.environ.copy()
+    env["WATCOM"] = WATCOM_DIR
+    env["PATH"] = os.pathsep.join(
+        [
+            os.path.join(WATCOM_DIR, "binnt64"),
+            os.path.join(WATCOM_DIR, "binnt"),
+            os.path.join(WATCOM_DIR, "binw"),
+            env.get("PATH", ""),
+        ]
+    )
+    env["INCLUDE"] = os.path.join(WATCOM_DIR, "h")
+    env["EDPATH"] = os.path.join(WATCOM_DIR, "eddat")
+    return env
+
+
+def have_pdcurses():
+    return os.path.isfile(os.path.join(PDCURSES_DIR, "dos", "pdcurses.lib"))
+
+
+def ensure_pdcurses(verbose=True):
+    """Download PDCurses 3.9 and build the 16-bit large-model DOS lib."""
+    if have_pdcurses():
+        if verbose:
+            _print("  PDCurses: already built.")
+        return
+    if not have_watcom():
+        ensure_watcom(verbose=verbose)
+    if verbose:
+        _print("  PDCurses: downloading ...")
+    os.makedirs(os.path.dirname(PDCURSES_ZIP), exist_ok=True)
+    _download(PDCURSES_URL, PDCURSES_ZIP)
+    if os.path.isdir(PDCURSES_DIR):
+        shutil.rmtree(PDCURSES_DIR)
+    tmp = PDCURSES_DIR + ".tmp"
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    with zipfile.ZipFile(PDCURSES_ZIP) as z:
+        z.extractall(tmp)
+    entries = os.listdir(tmp)
+    os.rename(os.path.join(tmp, entries[0]), PDCURSES_DIR)
+    shutil.rmtree(tmp)
+    if verbose:
+        _print("  PDCurses: building (wmake -f Makefile.wcc MODEL=s) ...")
+    subprocess.run(
+        [            _watcom_tool("wmake"), "-f", "Makefile.wcc", "MODEL=s"],
+        cwd=os.path.join(PDCURSES_DIR, "dos"),
+        env=_watcom_env(),
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    if not have_pdcurses():
+        sys.exit("ERROR: PDCurses build failed (pdcurses.lib missing).")
+    if verbose:
+        _print("  PDCurses: built.")
+
+
+def _hello_game_dir(system_dir):
+    return os.path.join(system_dir, "share", "games", "HELLO")
+
+
+def _hello_app_dir(system_dir):
+    return os.path.join(system_dir, "share", "apps", "HELLO")
+
+
+def have_hello_packages(system_dir):
+    return os.path.isfile(
+        os.path.join(_hello_game_dir(system_dir), "PACKAGE.INI")
+    ) and os.path.isfile(os.path.join(_hello_app_dir(system_dir), "PACKAGE.INI"))
+
+
+def ensure_hello_packages(system_dir, verbose=True, force=False):
+    """Seed the HELLO demo packages — but ONLY when their directory is absent.
+
+    If the user deleted a package through the menu (PACKAGE.INI removed,
+    other files may remain) the directory still exists and the package
+    stays deleted. --reseed-hello passes force=True to bring them back.
+    """
+    gdir = _hello_game_dir(system_dir)
+    adir = _hello_app_dir(system_dir)
+    if force or not os.path.isdir(gdir):
+        os.makedirs(gdir, exist_ok=True)
+        with open(os.path.join(gdir, "PACKAGE.INI"), "w", newline="") as f:
+            f.write(
+                "[package]\r\n"
+                "name=Hello Game\r\n"
+                "executable=hello.bat\r\n"
+                "args=gamer\r\n"
+            )
+        with open(os.path.join(gdir, "HELLO.BAT"), "w", newline="") as f:
+            f.write(
+                "@echo off\r\n"
+                "echo.\r\n"
+                "echo   HELLO from a GAME!  arg=%1\r\n"
+                "echo.\r\n"
+                "pause\r\n"
+            )
+        if verbose:
+            _print("  HELLO game package: created.")
+    if force or not os.path.isdir(adir):
+        os.makedirs(adir, exist_ok=True)
+        with open(os.path.join(adir, "PACKAGE.INI"), "w", newline="") as f:
+            f.write(
+                "[package]\r\n"
+                "name=Hello App\r\n"
+                "executable=hello.exe\r\n"
+                "args=world\r\n"
+            )
+        if verbose:
+            _print("  HELLO app package: created.")
+
+
+def have_hello_exe(system_dir):
+    return os.path.isfile(os.path.join(_hello_app_dir(system_dir), "HELLO.EXE"))
+
+
+def build_hello_exe(system_dir, verbose=True, force=False):
+    adir = _hello_app_dir(system_dir)
+    if not os.path.isdir(adir):
+        return  # user deleted the package; do not resurrect it
+    exe = os.path.join(adir, "HELLO.EXE")
+    src = os.path.join(TOOLS_DIR, "hello.c")
+    if not force and os.path.isfile(exe):
+        if os.path.getmtime(exe) >= os.path.getmtime(src):
+            return
+    if verbose:
+        _print("  HELLO.EXE: building ...")
+    subprocess.run(
+        [_watcom_tool("wcl"), "-q", "-bt=dos", "-l=dos", src, f"-fe={exe}"],
+        env=_watcom_env(),
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def have_menu_exe(system_dir):
+    return os.path.isfile(os.path.join(system_dir, "share", "menu", "MENU.EXE"))
+
+
+def build_menu_exe(system_dir, verbose=True, force=False):
+    exe = os.path.join(system_dir, "share", "menu", "MENU.EXE")
+    lib = os.path.join(PDCURSES_DIR, "dos", "pdcurses.lib")
+    srcs = [
+        os.path.join(TOOLS_DIR, f) for f in ("menu.c", "package.c", "inifile.c")
+    ]
+    deps = srcs + [
+        os.path.join(TOOLS_DIR, "package.h"),
+        os.path.join(TOOLS_DIR, "inifile.h"),
+        lib,
+    ]
+    if not force and os.path.isfile(exe):
+        if os.path.getmtime(exe) >= max(os.path.getmtime(p) for p in deps):
+            if verbose:
+                _print("  MENU.EXE: up to date.")
+            return
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    if verbose:
+        _print("  MENU.EXE: building ...")
+    subprocess.run(
+        [
+            _watcom_tool("wcl"), "-q", "-bt=dos", "-l=dos", "-ms", "-oneatx",
+            "-k8192",
+            f"-i={PDCURSES_DIR}",
+            f"-i={TOOLS_DIR}",
+        ]
+        + srcs
+        + [lib, f"-fe={exe}"],
+        env=_watcom_env(),
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def ensure_dos_tools(system_dir=None, verbose=True, force=False):
+    """Ensure the toolchain + HELLO packages + MENU.EXE/HELLO.EXE exist.
+
+    Called from ensure_all() on every launch (staleness-checked); also
+    exposed via --build-tools for a forced rebuild.
+    """
+    if system_dir is None:
+        system_dir = os.path.join(SYSTEMS_DIR, "dos622")
+    ensure_watcom(verbose=verbose)
+    ensure_pdcurses(verbose=verbose)
+    ensure_hello_packages(system_dir, verbose=verbose, force=force)
+    build_hello_exe(system_dir, verbose=verbose, force=force)
+    build_menu_exe(system_dir, verbose=verbose, force=force)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -382,6 +645,11 @@ def check_deps(system_dir):
         ("MS Network Client", have_msclient(system_dir)),
         ("RTL8029 driver", have_pcind(system_dir)),
         ("share/HELLO.TXT", have_share(system_dir)),
+        ("Open Watcom", have_watcom()),
+        ("PDCurses", have_pdcurses()),
+        ("share/menu/MENU.EXE", have_menu_exe(system_dir)),
+        ("HELLO packages", have_hello_packages(system_dir)),
+        ("HELLO.EXE", have_hello_exe(system_dir)),
     ]
 
 
@@ -411,6 +679,12 @@ def ensure_all(system_dir=None, verbose=True):
     ensure_msclient(system_dir, verbose=verbose)
     ensure_pcind(system_dir, verbose=verbose)
     ensure_share(system_dir, verbose=verbose)
+    try:
+        ensure_dos_tools(system_dir, verbose=verbose)
+    except (subprocess.CalledProcessError, OSError) as e:
+        _print(f"WARNING: DOS menu toolchain build failed ({e}).")
+        _print("         Guest menu launcher will be missing; retry with:")
+        _print("         python install.py --build-tools")
 
     dos_ok = have_dos622_floppies(system_dir)
 
@@ -444,6 +718,18 @@ def main():
         help="Only install QEMU (legacy single-dependency mode).",
     )
     parser.add_argument(
+        "--build-tools",
+        action="store_true",
+        help="Install the DOS toolchain (Open Watcom + PDCurses) and "
+        "(re)build MENU.EXE / HELLO.EXE.",
+    )
+    parser.add_argument(
+        "--reseed-hello",
+        action="store_true",
+        help="Force-recreate the HELLO demo packages (overwrites their "
+        "PACKAGE.INI / HELLO.BAT) and rebuild HELLO.EXE.",
+    )
+    parser.add_argument(
         "--system-dir",
         default=None,
         help=f"Override system directory (default: {os.path.join(SYSTEMS_DIR, 'dos622')})",
@@ -462,6 +748,14 @@ def main():
 
     if args.qemu_only:
         ensure_qemu()
+        return
+
+    if args.build_tools or args.reseed_hello:
+        ensure_watcom()
+        ensure_pdcurses()
+        ensure_hello_packages(system_dir, force=args.reseed_hello)
+        build_hello_exe(system_dir, force=args.reseed_hello)
+        build_menu_exe(system_dir, force=args.build_tools)
         return
 
     ok = ensure_all(system_dir)

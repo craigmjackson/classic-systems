@@ -9,7 +9,7 @@ directory `systems/dos622/share/` appears as `F:` inside the guest.
 
 | File | Role |
 |------|------|
-| `install.py` | Installs all dependencies: downloads QEMU from `qemu.weilnetz.de/w64/`, MS Network Client from `archive.org/msnc3`, RTL8029 driver from `archive.org/pcind.dos` (and builds `pcind.img`), creates the blank 2 GB C: drive via `qemu-img`, seeds `share/HELLO.TXT`. Exposes an importable `ensure_all(system_dir)` function that `start.py` calls. Also provides `--check` (report-only) and `--qemu-only` (legacy) CLI modes. |
+| `install.py` | Installs all dependencies: downloads QEMU from `qemu.weilnetz.de/w64/`, MS Network Client from `archive.org/msnc3`, RTL8029 driver from `archive.org/pcind.dos` (and builds `pcind.img`), creates the blank 2 GB C: drive via `qemu-img`, seeds `share/HELLO.TXT`, builds `share/menu/MENU.EXE` + `share/apps/HELLO/HELLO.EXE` from `tools/menu/` (staleness-checked on every run; `--build-tools` forces), and seeds the `share/games|apps/HELLO/` demo packages only when absent (`--reseed-hello` forces). Exposes an importable `ensure_all(system_dir)` function that `start.py` calls. Also provides `--check` (report-only) and `--qemu-only` (legacy) CLI modes. |
 | `start.py` | Loads `systems/<name>/package.yaml`, auto-runs `install.ensure_all()` (unless `--skip-deps`), launches the SMB host server, builds the QEMU command, runs QEMU (blocking), then tears down the server. Usage: `python start.py [system] [--skip-deps]` |
 | `setup_net.py` | Host-side offline installer of the full MS Network Client stack into `dos622_c.img` (extracts from `msclient/*.img`, writes 36 files incl. C:\NET binaries, SYSTEM.INI/PROTOCOL.INI/AUTOEXEC/NETMAP, embedded WFWSYS.CFG + SHARES.PWL + DOS622.PWL). No guest SETUP run needed. Usage: `python setup_net.py dos622 [--check|--dry-run|--force|--test]`. `--test` boots headless and verifies F: write end-to-end (waits for the guest's TREE_CONNECT in `smb_host.log`, then types `copy c:\config.sys f:\zz.txt` and compares host bytes). |
 | `floppy.py` | Runtime floppy control via QMP (port from `qemu.qmp_port`). Usage: `python floppy.py <system> eject`, `... insert <img>`, `... query`. `eject`/`insert` fall back to editing `package.yaml` alone when no VM/QMP is listening; `query` still requires a running VM. |
@@ -18,7 +18,8 @@ directory `systems/dos622/share/` appears as `F:` inside the guest.
 | `systems/dos622/dos622_{1..4}.img` | MS-DOS 6.22 setup floppy images — **user-provided**, not auto-downloaded (copyrighted retail media) |
 | `systems/dos622/dos622_c.img` | 2 GB raw FAT16 C: drive (auto-created by `install.py`) |
 | `systems/dos622/msclient/` | Auto-populated by `install.py`: `Disk1.img`, `Disk2.img` (MSN 3.0b), `pcind.img` (RTL8029 NDIS2 driver floppy). Also contains two manual recovery floppies: `config.img` (static IP + LMHOSTS), `swapnet.img` (driver + PROTOCOL.INI patcher) — not auto-generated. |
-| `systems/dos622/share/` | Host-side folder exposed as guest `F:`; auto-seeded with `HELLO.TXT` by `install.py` |
+| `systems/dos622/share/` | Host-side folder exposed as guest `F:`; auto-seeded with `HELLO.TXT` by `install.py` (entire tree is gitignored — generated/seed content) |
+| `tools/menu/` | Source of the in-guest TUI launcher: `menu.c` (PDCurses screens/dialogs), `package.c` (PACKAGE.INI scan/save/delete + run), `inifile.c/.h`, `package.h`. Built by `install.py` into `share/menu/MENU.EXE` — sources tracked, binaries gitignored. |
 | `systems/dos622/smb_host.log` | Server request log (append-only) |
 
 ## package.yaml schema
@@ -123,19 +124,23 @@ network:
 - DOS client does **not** set `SMB_FLAGS2_NT_STATUS` (flags2 = `0x0000`). Error responses MUST use DOS-class codes (packed as 32-bit NTSTATUS: `class:code`). Map in `NT_TO_DOS`: `0xC000000F/0xC0000034 → 0x00020001`, `0xC000003A → 0x00030001`, `0xC0000022/0xC0000005 → 0x00050001`, `0xC0000035 → 0x00500001`.
 - **TREE_CONNECT_ANDX** response: `Service` string (in `SMB_Data`) must be `"A:"` for disk shares per MS-CIFS §3.2.5.4 — anything else (including the share name) is classified as non-disk and the client returns **Error 66**. For `IPC$` use `"IPC"`. `NativeFileSystem` = `"FAT"` for DOS-era clients. `OptionalSupport = 0x0001` (SMB_SUPPORT_SEARCH_BITS).
 - **SESSION_SETUP_ANDX** LANMAN response: `Action = 0` (authenticated). `Action = 1` (guest login) is rejected by the DOS redirector for drive mapping.
-- **SMB_COM_SEARCH** (0x81) response data has a `0x05` BufferFormat byte + 2-byte DataLength header before the entries. Each entry is exactly **43 bytes**: 4-byte resume key (`0x04` + u32 index) + 16-byte 8.3 name (SPACE-padded, NOT NUL-padded) + 1-byte attrs + 2-byte DOS time + 2-byte DOS date + 4-byte size + 13-byte short name (SPACE-padded + NUL terminator).
+- **SMB_COM_SEARCH** (0x81) response data has a `0x05` BufferFormat byte + 2-byte DataLength header before the entries. Each entry is exactly **43 bytes**: 5-byte resume key (`0x04` + u32 index) + 16-byte 8.3 name (SPACE-padded, NOT NUL-padded) + 1-byte attrs (offset 21) + 2-byte DOS time + 2-byte DOS date + 4-byte size + 11-byte SPACE-padded 8.3 short name (NO dot between stem and ext) + attrs byte AGAIN (offset 41) + NUL (offset 42).
 - `SMB_COM_SEARCH` continuation: client echoes a *transformed* resume key (not the raw index we sent). Use a **server-side cursor keyed by TID** — never trust the echoed resume value.
+- `SMB_COM_SEARCH` new-vs-resume discriminator: the request path body either starts with `0x04`/printable ASCII (new search pattern → parse + listdir) or is a transformed resume key (non-printable → continue cursor). Never parse a resume key as a path.
+- **DOS 8.3 wildcard matching (`dos_match`)**: both name and mask are fixed-width fields (stem 8, ext 3), space-padded. `*` in the mask must expand to `?`-fill for the REST of the field — never space-pad a wildcard (`"*".ljust(3)` → `"*  "` makes `fnmatch("INI", "*  ")` fail on the trailing spaces; this broke every `*.c`-style no-dot mask like `????????`, so `PACKAGE.INI` never matched and package deletion's file search returned 0 entries while dirs matched by luck). No-dot masks mean ext=`*`.
+- `SearchAttributes` from the client (e.g. `0x10` for `_dos_findfirst(…, _A_SUBDIR)`) is parsed for logging and the volume-label special case only — entries are returned regardless of attrs (clients filter).
 - `SMB_COM_CHECK_DIRECTORY` (0x10) request data starts with a `0x04` BufferFormat byte; skip it before parsing the path.
-- `SMB_COM_WRITE` (0x0B): words `[FID, Count, OffsetLo, OffsetHi, Reserved]`; data appended at end of body.
+- `SMB_COM_WRITE` (0x0B): words `[FID, Count, OffsetLo, OffsetHi, Reserved]`; data appended at end of body. **Count=0 means DOS `AH=40h/CX=0`: truncate the file at OffsetLo** — Watcom CRT `fopen("wb")` opens with no create/truncate disposition and then issues this 0-byte write as its truncate; `fopen("ab")` never sends one (verified safe to truncate on it).
 - `SMB_COM_READ` (0x0A): response words `[Count, Reserved, Reserved, Reserved, Reserved]`; data follows body.
 - `SMB_COM_QUERY_INFORMATION` (0x08): DOS redirector sends this BEFORE write to validate the file. `LastWriteTime` is UTIME (32-bit Unix seconds as two u16 lo/hi), **not** DOS date/time.
-- `SMB_COM_OPEN_ANDX` (0x2D): if the request `Flags` word has bit 0 set, include file info (attrs + UTIME + size) in the response; otherwise fields after FID MUST all be zero or the client rejects the response.
+- `SMB_COM_OPEN_ANDX` (0x2D): if the request `Flags` word has bit 0 set, include file info (attrs + UTIME + size) in the response; otherwise fields after FID MUST all be zero or the client rejects the response. Request word layout as seen from MSNC: `w[3]` = desired access (0=RO, 1=WO, 2=RW), `w[8]` = open function — `0x12` (DOS `AH=3Ch` via COMMAND.COM, e.g. `echo >`) triggers the `open_mode & 0x0002` truncate branch in `cmd_2d`; `0x1` (Watcom CRT) does not, and the CRT relies on the Count=0 WRITE truncate instead.
+- **Core SMB command numbers (per impacket's table, NOT modern NT numbering)**: `0x00` CREATE_DIRECTORY (mkdir), `0x01` DELETE_DIRECTORY (rmdir), `0x02` OPEN, `0x03` CREATE, `0x04` CLOSE, `0x05` FLUSH, `0x06` DELETE (unlink), `0x08` QUERY_INFORMATION, `0x0A` READ, `0x0B` WRITE, `0x12` SEEK, `0x71` TREE_DISCONNECT, `0x81` SEARCH. Note the client's dir/delete traffic uses `0x00`/`0x01`/`0x06` — the old AGENTS claim that `0x00`/`0x03` were "close/disconnect" was wrong.
+- `cmd_00` (CREATE_DIRECTORY) is dual-purpose: body starts with `0x04` BufferFormat → parse path + `os.mkdir` (`FileExistsError` → `NT_NAME_COLLISION`, `OSError` → `NT_ACCESS_DENIED`); a legacy empty body (seen only at session close) → `self.closed = True` + empty ack. `cmd_01` = `os.rmdir` (non-empty dir → `NT_ACCESS_DENIED`, which is correct — clients must delete files first). `cmd_06` = `os.remove` (unlink) with the same `0x04` path prefix skip.
 - `SMB_COM_CLOSE` (0x04): simple FID close, no response data.
 - `SMB_COM_QUERY_INFORMATION_DISK` (0x80): response words `[TotalUnits, BlocksPerUnit, BytesPerBlock, FreeUnits, Reserved]`.
 - `find_next` via `SMB_COM_SEARCH` with the client's transformed resume key: ignore the key, just return the next chunk from the server-side cursor.
 - The `flags2 & 0x8000` (UNICODE) bit: client never sets it for LANMAN dialects. Encode strings accordingly (CP437/OEM, not UTF-16LE).
-- `0x00` SMB_COM_CLOSE_AND_TREE_DISCONNECT: not required; client uses explicit `TREE_DISCONNECT` (0x71).
-- `0x03` SMB_COM_TREE_DISCONNECT: no params, no data, ack with empty response.
+- `TREE_DISCONNECT`: the client never seems to send `0x71` explicitly (no such REQ in the log); do not special-case it. `cmd_05` (FLUSH number) arrives with seek-like words (only 3× ever) and is treated as a seek — harmless.
 
 ### setup_net.py (offline network install) & headless logon
 
@@ -176,15 +181,53 @@ network:
   `copy c:\config.sys f:\zz.txt` into the logon prompt (its chars became the
   username / a stray `create password-list?` answer).
 - QMP `send-key` qcode gotchas: `colon` is **rejected** by QEMU 11 — send
-  `[{"qcode","shift"},{"qcode","semicolon"}]`; `.` is `dot`. Spacing keys
+  `[{"qcode","shift"},{"qcode","semicolon"}]`; `.` is `dot`. **`ins` is also
+  invalid — the qcode is `insert`** (likewise `delete`, not `del`). Spacing keys
   <0.12 s apart drops characters. PowerTip: inline `python -c` through
-  PowerShell mangles quotes — write debug scripts as .py files.
+  PowerShell mangles quotes — write debug scripts as .py files. Harness
+  wrappers around `qmp.send({"execute":"send-key",…})` often return None and
+  silently discard QMP `error` replies — a typo'd qcode then looks like "the
+  key did nothing"; print `reply["error"]` when debugging missed keystrokes.
 - `IPCONFIG.EXE` requires an argument (`ipconfig c:\net`) and prints
   `No DHCP data available` with `DisableDHCP=1` — that is **normal** for the
   static config; `ping 10.0.2.2` succeeding proves the stack + slirp path.
 - PROTOCOL.INI space-separated octets (`IPAddress0=10 0 2 15`,
   `SubNetMask0=255 255 255 0`, `DefaultGateway0=10 0 2 2`) are correct for
   MS Client's TCPIP$ driver (verified by ping).
+
+### MENU.EXE (in-guest PDCurses launcher)
+
+- Built by `install.py` (`build_menu_exe`) from `tools/menu/{menu,package,inifile}.c`
+  with Open Watcom: `wcc -ms -oneatx -bt=dos …` + `-k8192` stack. **`-k16384`
+  left only 218 B `_memavl`** — PDCurses `newwin()` then returned NULL and the
+  menu sat forever on a blue screen. Small model (`-ms`) needs
+  `pdcdos.h`'s `__SMALL__`→`SMALL` mapping (PDCurses' DOS port checks
+  `__SMALL__`, Watcom defines `SMALL`). Watcom quirks hit along the way:
+  E1058 (initializers after stdio calls), no `-Fc`/`-S` output options
+  accepted by the driver invocations used here.
+- PDCurses: sources in `deps/pdcurses/` (pristine zip `deps/pdcurses-3.9.zip`),
+  build via `wmake -f Makefile.wcc MODEL=s` **with cwd `deps/pdcurses/dos/`**.
+  **Zip extraction preserves the original 2019 mtimes** — after re-extracting
+  sources you MUST `del *.obj pdcurses.lib` before wmake, or wmake sees the
+  old .objs as "newer" and silently skips the rebuild.
+- `PACKAGE.INI` schema (written CRLF by `pkg_save`):
+  `[package]\r\nname=%s\r\nexecutable=%s\r\nargs=%s\r\n`. Scanned from
+  `F:\GAMES\<dir>\` and `F:\APPS\<dir>\`; sorted by name (stricmp).
+- `pkg_run` EXEC rule: direct `spawnv` only when the exe extension is
+  `.com`/`.exe` (case-insensitive last-4-chars check); everything else —
+  including `.bat` — goes through `%COMSPEC% /c`. **DOS loads a `.bat` handed
+  to it as a binary program**: a junk executable name (`hello.batTest Package`)
+  got 8.3-mangled into the real `HELLO.BAT`, DOS executed its text as code →
+  triple fault → QEMU rebooted to the SeaBIOS screenshot.
+- Delete flow requires typing `DELETE` (strcmpi) after choosing full delete;
+  the quick `y` path only removes `PACKAGE.INI`. `del_tree` walks with
+  `_dos_findfirst(pat, _A_SUBDIR)` + `remove` + `_rmdir` — it depends on the
+  `dos_match` 8.3 rule above to see `PACKAGE.INI` under the `????????` mask.
+- E2E harnesses (ad-hoc, `C:\Users\craig\AppData\Local\Temp\opencode\`):
+  `menu_smoke_test.py` (7 screens: scan/list/run bat/run exe/args/exit) and
+  `crud_test.py` (6 checks: list, edit→exact-bytes save incl. truncate, add→
+  mkdir+INI-bytes, delete→DELETE+RMDIR, HELLO untouched). Both boot headless
+  (`-display none`), spawn their own `smb_host.py`, wait for TREE_CONNECT+4 s.
 
 ### FAT image surgery
 
@@ -242,7 +285,9 @@ prompt appears; NETMAP maps `F:` and returns to `C:\>` hands-free.
 - ~~Automate MS Client setup end-to-end~~ — done: `setup_net.py` installs the
   whole stack offline into the image (no guest SETUP, no UNATTEND.TXT needed);
   `--test` verifies boot→F: write end-to-end.
-- Add a `.gitignore` for `*.log`, `__pycache__/`, `deps/qemu/`, and the 2 GB `dos622_c.img` (user may want to keep it outside repo).
+- ~~Add a `.gitignore`~~ — done: `*.img`, `*.log`, `*.obj`, `*.err`, `*.map`,
+  `__pycache__/`, `deps/`, and the whole `systems/*/share/` tree (all seed +
+  build output; `tools/menu/` sources stay tracked).
 - Consider adding a `-display none` flag to `start.py` for headless automation.
 - Consider auto-detecting when `smb_host.py` crashes (Defender quarantine, missing port) and surfacing a clearer error than "connection refused".
 - Factor `check_deps()` / `ensure_all()` so new systems (e.g. Win3.1, FreeDOS) can declare their own deps in `package.yaml` instead of being hard-coded to `dos622`.

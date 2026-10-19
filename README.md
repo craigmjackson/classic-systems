@@ -11,9 +11,11 @@ Windows; they show up in DOS instantly, and vice versa.
   retail media and are **not** included with this project or auto-downloaded;
   obtain them from your own disks or a legally-acquired ISO (see
   "What install.py does")
-- ~2.5 GB free for QEMU (~250 MB) + 2 GB disk image + network client (~3 MB)
+- ~4 GB free for QEMU (~1.2 GB extracted) + 2 GB disk image + Open Watcom
+  toolchain (~500 MB) + network client (~3 MB)
 - `PyYAML` — install once: `python -m pip install pyyaml`
-- Internet connection on first run (installs download QEMU + network stack)
+- Internet connection on first run (installs download QEMU + network stack +
+  the Open Watcom/PDCurses toolchain used to build the in-guest menu)
 
 ## Quick start
 
@@ -22,7 +24,8 @@ python start.py dos622      # auto-installs missing deps, then boots
 ```
 
 On first run this downloads ~250 MB of QEMU binaries plus ~3 MB of DOS
-networking files. Subsequent runs skip the downloads.
+networking files, and fetches the Open Watcom + PDCurses toolchain that
+builds the in-guest menu launcher. Subsequent runs skip the downloads.
 
 What it does **not** download is MS-DOS itself. On a fresh checkout there is
 no bootable disk yet, so you must provide the DOS 6.22 setup floppies
@@ -41,7 +44,9 @@ python start.py dos622      # boots the VM
 
 The QEMU window opens. The DOS boot takes ~30 s (PCnet driver → TCP/IP
 stack → login → share mapping). At the `C:\>` prompt, `F:` is already
-mapped to `systems/dos622/share/` on the host.
+mapped to `systems/dos622/share/` on the host. For a point-and-shoot
+launcher instead of the command line, run `f:\menu\menu.exe` (see
+"The MENU launcher").
 
 ```
 F: connected to \\SMBSERVER\HOST.
@@ -52,9 +57,12 @@ C:\>dir f:
  Volume in drive F has no label
  Directory of F:\
 
-HELLO     TXT         106 10-13-26 10:01p
-              1 file(s)            106 bytes
-      266,240,000 bytes free
+HELLO    TXT           108 10-17-26  12:47p
+APPS         <DIR>         10-18-26   3:18p
+GAMES        <DIR>         10-18-26   9:10p
+MENU         <DIR>         10-18-26   9:00p
+        4 file(s)            108 bytes
+                     266,240,000 bytes free
 ```
 
 ## Using the share
@@ -73,6 +81,52 @@ type f:\HELLO.TXT
 Files you drop into `systems/dos622/share/` (via Explorer, `copy`, etc.)
 appear on `F:` the next time DOS reads the directory. Files created by the
 guest appear on the host immediately (the server flushes writes).
+
+## The MENU launcher
+
+`F:\MENU\MENU.EXE` is an in-guest TUI (PDCurses) for browsing and launching
+your DOS games and apps. It is built automatically from the `tools/menu/`
+sources on every `start.py` run (only when the sources are newer than the
+binary); force a rebuild with `python install.py --build-tools`.
+
+```
+C:\>f:\menu\menu.exe
+```
+
+The main screen shows **Games**, **Apps** and **Quit**, with a live package
+count next to each. Games and Apps list one entry per subdirectory of
+`F:\GAMES\` / `F:\APPS\` that contains a `PACKAGE.INI`.
+
+| Key | Action |
+|-----|--------|
+| ↑ / ↓, Enter | move selection / run the highlighted package |
+| Esc | back to the previous screen; from the main screen, quit |
+| `e` | edit the selected package (name / executable / args) |
+| `Ins` or `a` | add a package — asks for directory, name, executable, args |
+| `Del` | delete the selected package: `y` removes only `PACKAGE.INI`; `d` starts a full delete (package directory included) and then requires you to type `DELETE` to confirm |
+
+### PACKAGE.INI
+
+Each package is a directory on the share holding the program's files plus a
+small metadata file:
+
+```ini
+[package]
+name=Hello Game
+executable=hello.bat
+args=gamer
+```
+
+- `name` — display name in the list
+- `executable` — file inside the package directory; `.com` and `.exe` are
+  executed directly, everything else (including `.bat`) runs through
+  `COMMAND.COM /c`
+- `args` — optional command line appended when the package runs
+
+To add a game by hand: copy its files into `F:\GAMES\MYGAME\` and drop in a
+`PACKAGE.INI` as above — it appears the next time the list opens. Two demo
+packages ship with the install (`F:\GAMES\HELLO` and `F:\APPS\HELLO`);
+restore them at any time with `python install.py --reseed-hello`.
 
 ## Installing DOS & hot-swapping floppies
 
@@ -203,11 +257,15 @@ network:
 
 | Dependency | Source | Size | Auto-download |
 |------------|--------|------|---------------|
-| QEMU w64 binaries | qemu.weilnetz.de/w64/ | ~250 MB | Yes |
+| QEMU w64 binaries | qemu.weilnetz.de/w64/ | ~250 MB (~1.2 GB extracted) | Yes |
 | MS Network Client 3.0b (Disk1/2) | archive.org/msnc3 | ~3 MB | Yes |
 | RTL8029 NDIS2 driver floppy | archive.org/pcind.dos + build | 1.44 MB | Yes |
+| Open Watcom 2.0 (C toolchain) | github.com/open-watcom releases | ~500 MB extracted | Yes |
+| PDCurses 3.9 (curses library) | github.com/wmcbrine/PDCurses | ~2 MB | Yes (built with Watcom) |
 | Blank 2 GB C: drive | `qemu-img create` | 2 GB | Yes |
-| `share/HELLO.TXT` | created locally | 106 B | Yes |
+| `share/HELLO.TXT` | created locally | 108 B | Yes |
+| `share/menu/MENU.EXE`, `share/apps/HELLO/HELLO.EXE` | built from `tools/menu/` | ~50 KB | Yes (rebuilt when sources are newer) |
+| `share/games/HELLO/`, `share/apps/HELLO/` demo packages | created locally | small | Yes (only when missing) |
 | `systems/dos622/package.yaml` | repo file | — | N/A |
 | `floppy.py`, `smb_host.py`, `start.py` | repo files | — | N/A |
 | DOS 6.22 setup floppies (`dos622_1..4.img`) | **user-provided** | ~6 MB | No |
@@ -221,12 +279,14 @@ your own disks or a legally-acquired ISO image. Boot works without them
 
 ```
 .
-├── install.py          # downloads QEMU + MSN + RTL8029, creates C: drive + share/
+├── install.py          # downloads QEMU + MSN + RTL8029 + Watcom/PDCurses, builds MENU.EXE
 ├── start.py            # launches SMB server + QEMU (auto-calls install.ensure_all)
 ├── setup_net.py        # offline MS Network Client install into dos622_c.img
 ├── floppy.py           # runtime floppy insert/eject via QMP
 ├── smb_host.py         # stdlib-only SMB1 server (host-side)
-├── deps/qemu/AMD64/    # QEMU binaries (created by install.py)
+├── tools/
+│   └── menu/           # sources of the in-guest MENU.EXE launcher
+├── deps/               # created by install.py: qemu/, watcom/, pdcurses/
 └── systems/dos622/
     ├── package.yaml
     ├── dos622_{1..4}.img       # MS-DOS 6.22 setup floppies (user-provided)
@@ -237,8 +297,11 @@ your own disks or a legally-acquired ISO image. Boot works without them
     │   ├── pcind.img               # RTL8029 NDIS2 driver (auto-built)
     │   ├── swapnet.img             # optional recovery floppy (manual)
     │   └── config.img              # optional recovery floppy (manual)
-    └── share/                      # ← host folder, exposed as F: (auto-created)
-        └── HELLO.TXT
+    └── share/                  # ← host folder, exposed as F: (auto-created, gitignored)
+        ├── HELLO.TXT
+        ├── menu/MENU.EXE       # built from tools/menu/ by install.py
+        ├── games/HELLO/        # demo package (runs HELLO.BAT)
+        └── apps/HELLO/         # demo package (runs HELLO.EXE)
 ```
 
 ## CLI flags
@@ -246,6 +309,8 @@ your own disks or a legally-acquired ISO image. Boot works without them
 ```
 python install.py --check      # report missing deps without installing
 python install.py --qemu-only  # legacy: only install QEMU
+python install.py --build-tools   # install Watcom/PDCurses + force-rebuild MENU.EXE / HELLO.EXE
+python install.py --reseed-hello  # restore the HELLO demo packages (overwrites edits)
 python install.py --system-dir systems/dos622  # target a different system
 
 python start.py --skip-deps dos622   # bypass dep check (e.g. air-gapped)
@@ -255,7 +320,8 @@ python setup_net.py dos622 --test    # offline network install + boot test
 
 ## Notes & gotchas
 
-- **First run is slow** — QEMU download is ~250 MB. Subsequent runs are fast.
+- **First run is slow** — ~250 MB of QEMU plus the Open Watcom toolchain is
+  downloaded on the first boot. Subsequent runs are fast.
 - **Don't touch `smb_host.py`'s port** — the DOS redirector connects to
   port 139 by default. QEMU's slirp NAT makes `10.0.2.2:139` in the guest
   reach `127.0.0.1:139` on the host.
@@ -278,6 +344,7 @@ python setup_net.py dos622 --test    # offline network install + boot test
 | `install.py --check` shows MISSING | Some dep not downloaded | Run `python install.py` |
 | QEMU window flashes closed | QMP port 4444 already in use | Kill lingering `qemu-system-x86_64.exe`; or pick a different `qmp_port` |
 | `dir f:` → "Invalid drive specification" | SMB server process died | Check `systems/dos622/smb_host.log` for tracebacks |
+| `f:\menu\menu.exe` → "Bad command or file name" or a blank blue screen | menu never built / stale build | `python install.py --build-tools` (rebuilds from `tools/menu/`) |
 | `Error 53` computer name not found | LMHOSTS missing/wrong | Re-apply `10.0.2.2 smbserver  #PRE\r\n` to `C:\NET\LMHOSTS` in the image |
 | `Error 66` network resource type incorrect | Stale `smb_host.py` | Update to the current version (uses `Service="A:"` for disk shares) |
 | Boot hangs at "Loading PCI Ethernet..." | EMM386 / UMB missing, or `LH` on TSRs | `DOS=HIGH,UMB` in CONFIG.SYS; remove `LH` prefixes from AUTOEXEC |
@@ -288,6 +355,8 @@ python setup_net.py dos622 --test    # offline network install + boot test
 - QEMU Windows builds: https://qemu.weilnetz.de/w64/ (Stefan Weil)
 - MS Network Client 3.0b: https://archive.org/details/msnc3 (Microsoft, 1994)
 - RTL8029 NDIS2 driver: https://archive.org/details/pcind.dos (Realtek, ~2000)
+- Open Watcom V/2 compiler: https://github.com/open-watcom/open-watcom-v2
+- PDCurses (menu TUI): https://github.com/wmcbrine/PDCurses (Paul McBride)
 - MS-DOS 6.22 setup disks: user-supplied 4 × 1.44 MB images from a 1994
   retail set (not distributed with this project)
 - SMB1 wire format: Microsoft MS-CIFS spec [MS-CIFS]-250210

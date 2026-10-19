@@ -181,7 +181,7 @@ class SmbConn(threading.Thread):
                  0x0A: "READ", 0x0B: "WRITE", 0x08: "QUERY_INFORMATION", 0x10: "CHECK_DIRECTORY",
                  0x2F: "WRITE_ANDX", 0x04: "CLOSE", 0x06: "DELETE", 0xA2: "NT_CREATE_ANDX",
                  0x2B: "ECHO", 0x24: "LOCKING_ANDX", 0x02: "CREATE", 0x0A: "ECHO2",
-                 0x05: "SEEK", 0xD4: "LOCKX", 0x00: "SMBCLOSE"}
+                 0x05: "SEEK", 0xD4: "LOCKX", 0x00: "MKDIR", 0x01: "RMDIR", 0x03: "CREATE2"}
         log(f"REQ  {names.get(cmd, hex(cmd))} uid={r['uid']} tid={r['tid']} wc={r['wc']} bc={len(r['body'])} flags2={r['flags2']:#x}")
         fn = self.cmd_25 if cmd == 0x32 else getattr(self, f"cmd_{cmd:02x}", None)
         if fn:
@@ -364,13 +364,20 @@ class SmbConn(threading.Thread):
         entry = self.tids.get(r["tid"])
         return entry[0] if entry else self.root
 
-    def path_of(self, r, raw):
-        path = self.decode_string(raw, r["flags2"]).replace("/", "\\").strip("\\")
+    def _join_root(self, r, rel):
+        """Resolve a client-relative path inside the share for this TID."""
         base = self.cur_root(r)
-        parts = [p for p in path.split("\\") if p]
+        parts = [p for p in rel.replace("/", "\\").split("\\") if p]
         if parts and parts[0].upper() in ("??", self.share.upper()):
             parts = parts[1:]
-        return os.path.normpath(os.path.join(base, *parts)) if parts else base
+        full = os.path.normpath(os.path.join(base, *parts)) if parts else base
+        if full != base and not full.startswith(base + os.sep):
+            return base
+        return full
+
+    def path_of(self, r, raw):
+        path = self.decode_string(raw, r["flags2"]).replace("/", "\\")
+        return self._join_root(r, path)
 
     def find_entry(self, full, name, level, unicode_names):
         st = os.stat(full)
@@ -408,9 +415,12 @@ class SmbConn(threading.Thread):
     def t2_find_first(self, r, params, data):
         attrs, maxcnt, flags, level = struct.unpack("<HHHH", params[0:8])
         raw_pattern = params[12:] if len(params) > 12 else data
-        pattern = self.decode_string(raw_pattern, r["flags2"]).strip("\\\x00") or "*"
-        mask = pattern.rsplit("\\", 1)[-1] or "*"
-        target = self.cur_root(r)
+        if raw_pattern.startswith(b"\x04"):
+            raw_pattern = raw_pattern[1:]
+        pattern = self.decode_string(raw_pattern, r["flags2"]).strip("\x00")
+        dpart, _, mask = pattern.replace("/", "\\").rpartition("\\")
+        mask = mask or "*"
+        target = self._join_root(r, dpart)
         log(f"  find_first attrs={attrs:#x} max={maxcnt} level={level:#x} pattern={pattern!r}")
         try:
             names = sorted(os.listdir(target))
@@ -422,13 +432,12 @@ class SmbConn(threading.Thread):
             keep = [n for n in names if self.dos_match(n, mask)]
         sh = self.sh_seq
         self.sh_seq += 1
-        self.searches[sh] = keep
+        self.searches[sh] = (keep, target)
         log(f"  find_first matched={keep}")
         self.find_response(r, sh, level, from_idx=0)
 
     def find_response(self, r, sh, level, from_idx):
-        target = self.cur_root(r)
-        names = self.searches[sh]
+        names, target = self.searches[sh]
         buf = b""
         count = 0
         i = from_idx
@@ -446,7 +455,7 @@ class SmbConn(threading.Thread):
             i += 1
         eos = 1 if i >= len(names) else 0
         if not eos:
-            self.searches[sh] = names[i:]
+            self.searches[sh] = (names[i:], target)
         params = struct.pack("<HHHHH", sh, count, eos, 0, 0)
         log(f"  find_response count={count} eos={eos} bytes={len(buf)}")
         self.send_trans2(r, params, buf, [])
@@ -634,8 +643,18 @@ class SmbConn(threading.Thread):
             nstem, next_ = name.rsplit(".", 1)
         else:
             nstem, next_ = name, ""
-        return (fnmatch.fnmatch(nstem.ljust(8), mstem.ljust(8))
-                and fnmatch.fnmatch(next_.ljust(3), mext.ljust(3)))
+
+        # DOS 8.3 semantics: both sides are fixed-width (8/3) space-padded
+        # fields; '*' in the mask expands to fill the rest of the field with
+        # '?' (never with spaces, or fnmatch("INI", "*  ") fails).
+        def expand(p, w):
+            if "*" in p:
+                head = p[: p.index("*")]
+                p = head[:w] + "?" * max(0, w - len(head))
+            return p[:w].ljust(w)
+
+        return (fnmatch.fnmatch(nstem[:8].ljust(8), expand(mstem, 8))
+                and fnmatch.fnmatch(next_[:3].ljust(3), expand(mext, 3)))
 
     def cmd_81(self, r):
         w = r["words"]
@@ -643,29 +662,39 @@ class SmbConn(threading.Thread):
         attrs = w[1] if len(w) > 1 else 0
         raw = r["body"]
         key = ("s81", r["tid"])
-        if len(raw) >= 21 and raw[0:1] == b"\x04" and key in self.searches:
-            names, cursor = self.searches[key]
+        phead = raw[1:] if raw[0:1] == b"\x04" else raw
+        nul = phead.find(b"\x00")
+        if nul >= 0:
+            phead = phead[:nul]
+        is_new = bool(phead) and all(0x20 <= c < 0x7F for c in phead)
+        if key in self.searches and not is_new:
+            names, cursor, target = self.searches[key]
             start = cursor
             log(f"  search resume cursor={cursor} attrs={attrs:#x}")
         else:
-            pat = self.decode_string(raw, r["flags2"]).replace("/", "\\")
-            mask = pat.rsplit("\\", 1)[-1].upper() or "*"
-            log(f"  search new attrs={attrs:#x} mask={mask!r}")
+            praw = raw
+            if praw.startswith(b"\x04"):
+                praw = praw[1:]
+            pat = self.decode_string(praw, r["flags2"]).replace("/", "\\")
+            dpart, _, mask = pat.rpartition("\\")
+            mask = mask.upper() or "*"
+            target = self._join_root(r, dpart)
+            log(f"  search new attrs={attrs:#x} mask={mask!r} pat={pat!r} dpart={dpart!r} target={target!r}")
             if attrs & 0x08 and not (attrs & 0x37):
-                self.searches[key] = ([], 0)
+                self.searches[key] = ([], 0, target)
                 self.send(self.reply(r, [0], b"\x05\x00\x00"))
                 return
             try:
-                allnames = sorted(os.listdir(self.cur_root(r)))
-            except OSError:
+                allnames = sorted(os.listdir(target))
+            except OSError as e:
+                log(f"  search listdir failed: {e}")
                 return self.send(self.reply(r, [], status=NT_PATH_NOT_FOUND))
             if mask in ("*", "*.*", "?"):
                 names = allnames
             else:
                 names = [n for n in allnames if self.dos_match(n, mask)]
             start = 0
-            self.searches[key] = (names, 0)
-        target = self.cur_root(r)
+            self.searches[key] = (names, 0, target)
         buf = b""
         count = 0
         i = start
@@ -680,18 +709,21 @@ class SmbConn(threading.Thread):
             base = names[i].upper()
             if "." in base:
                 stem, ext = base.rsplit(".", 1)
-                raw8 = (stem[:8] + "." + ext[:3]) if ext else stem[:8]
             else:
-                raw8 = base[:8]
-            dosname = raw8.encode("cp437", "replace").ljust(12, b" ") + b"\x00"
-            entry = b"\x04" + struct.pack("<I", i + 1) + dosname[:12].ljust(16, b"\x00")
-            entry += bytes([attrs_for(full, isdir)]) + struct.pack("<H", dos_time(st.st_mtime))
+                stem, ext = base, ""
+            eattr = attrs_for(full, isdir)
+            long16 = (stem[:8] + ("." + ext[:3] if ext else "")).encode(
+                "cp437", "replace").ljust(16, b"\x00")
+            dos11 = stem[:8].encode("cp437", "replace").ljust(8, b" ")
+            dos11 += ext[:3].encode("cp437", "replace").ljust(3, b" ")
+            entry = b"\x04" + struct.pack("<I", i + 1) + long16
+            entry += bytes([eattr]) + struct.pack("<H", dos_time(st.st_mtime))
             entry += struct.pack("<H", dos_date(st.st_mtime)) + struct.pack("<I", 0 if isdir else st.st_size)
-            entry += dosname
+            entry += dos11 + bytes([eattr]) + b"\x00"
             buf += entry
             count += 1
             i += 1
-        self.searches[key] = (names, i)
+        self.searches[key] = (names, i, target)
         log(f"  search start={start} count={count} total={len(names)}")
         self.send(self.reply(r, [count], b"\x05" + struct.pack("<H", len(buf)) + buf))
 
@@ -747,8 +779,14 @@ class SmbConn(threading.Thread):
         kind, f, target = self.files.get(fid, (None, None, None))
         if kind == "file" and f is not None:
             try:
-                f.seek(off)
-                f.write(data)
+                if count == 0:
+                    # DOS AH=40h with CX=0 truncates the file at the current
+                    # offset; CRT fopen("wb") uses this after an OPEN_ANDX
+                    # that carried no create/truncate disposition.
+                    f.truncate(off)
+                else:
+                    f.seek(off)
+                    f.write(data)
             except OSError:
                 pass
         log(f"  legacy write {len(data)} bytes at {off} fid={fid}")
@@ -768,7 +806,10 @@ class SmbConn(threading.Thread):
         except OSError:
             return self.send(self.reply(r, [], status=NT_ACCESS_DENIED))
         log(f"  core read {len(data)} bytes at {off} fid={fid}")
-        self.send(self.reply(r, [len(data), 0, 0, 0, 0], data))
+        # MS LAN Manager DOS redirector parses the core READ response as
+        # 6 words (WordCount=6) + ByteCount + 1 pad byte + Data. A spec
+        # 5-word response without padding shifts all file data by 3 bytes.
+        self.send(self.reply(r, [len(data), 0, 0, 0, 0, 0], b"\x00" + data))
 
     def cmd_04(self, r):
         fid = r["words"][0] if r["wc"] else 0
@@ -880,7 +921,29 @@ class SmbConn(threading.Thread):
         self.send(self.reply(r, [0xFF, 0, 0x0024, 0]))
 
     def cmd_00(self, r):
+        raw = r["body"]
+        if raw.startswith(b"\x04"):
+            raw = raw[1:]
+            target = self.path_of(r, raw)
+            try:
+                os.mkdir(target)
+            except FileExistsError:
+                return self.send(self.reply(r, [], status=NT_NAME_COLLISION))
+            except OSError:
+                return self.send(self.reply(r, [], status=NT_ACCESS_DENIED))
+            return self.send(self.reply(r, []))
         self.closed = True
+        self.send(self.reply(r, []))
+
+    def cmd_01(self, r):
+        raw = r["body"]
+        if raw.startswith(b"\x04"):
+            raw = raw[1:]
+        target = self.path_of(r, raw)
+        try:
+            os.rmdir(target)
+        except OSError:
+            return self.send(self.reply(r, [], status=NT_ACCESS_DENIED))
         self.send(self.reply(r, []))
 
     def cmd_02(self, r):
