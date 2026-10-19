@@ -223,11 +223,19 @@ network:
   the quick `y` path only removes `PACKAGE.INI`. `del_tree` walks with
   `_dos_findfirst(pat, _A_SUBDIR)` + `remove` + `_rmdir` — it depends on the
   `dos_match` 8.3 rule above to see `PACKAGE.INI` under the `????????` mask.
+- `pkg_dialog` must repaint **every** field value on each outer-loop pass
+  (labels alone is the bug that left unfocused fields blank until focused);
+  `edit_field` returns `KEY_UP`/`KEY_DOWN`/`KEY_BTAB` as field navigation —
+  `pkg_dialog` wraps with them, while `do_delete`'s confirm loop swallows them
+  (its return value is otherwise ignored, so they must not close the dialog).
 - E2E harnesses (ad-hoc, `C:\Users\craig\AppData\Local\Temp\opencode\`):
-  `menu_smoke_test.py` (7 screens: scan/list/run bat/run exe/args/exit) and
+  `menu_smoke_test.py` (7 screens: scan/list/run bat/run exe/args/exit),
   `crud_test.py` (6 checks: list, edit→exact-bytes save incl. truncate, add→
-  mkdir+INI-bytes, delete→DELETE+RMDIR, HELLO untouched). Both boot headless
-  (`-display none`), spawn their own `smb_host.py`, wait for TREE_CONNECT+4 s.
+  mkdir+INI-bytes, delete→DELETE+RMDIR, HELLO untouched), and
+  `dialog_view_test.py` (4 screenshots: all-fields-painted-on-open, live
+  typing echo, ↓/↑ field switching, Esc cancels without saving). All boot
+  headless (`-display none`), spawn their own `smb_host.py`, wait for
+  TREE_CONNECT+4 s.
 
 ### FAT image surgery
 

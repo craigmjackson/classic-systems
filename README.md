@@ -105,6 +105,10 @@ count next to each. Games and Apps list one entry per subdirectory of
 | `Ins` or `a` | add a package — asks for directory, name, executable, args |
 | `Del` | delete the selected package: `y` removes only `PACKAGE.INI`; `d` starts a full delete (package directory included) and then requires you to type `DELETE` to confirm |
 
+Inside the add/edit dialog all field values are visible from the moment it
+opens; `Tab` / `Enter` / `↑` / `↓` move between fields (all values are
+saved — `Esc` cancels without touching `PACKAGE.INI`).
+
 ### PACKAGE.INI
 
 Each package is a directory on the share holding the program's files plus a

@@ -115,7 +115,8 @@ static void msg_box(const char *title, const char *msg)
 }
 
 /* Single-line field editor. Returns the key that finished editing:
- * '\n' (Enter), '\t' (Tab), or 27 (Esc). */
+ * '\n' (Enter), '\t' (Tab), 27 (Esc), or KEY_UP/KEY_DOWN/KEY_BTAB
+ * (field navigation; caller decides what to do with them). */
 static int edit_field(WINDOW *w, int y, int x, int width,
                       char *buf, int buflen)
 {
@@ -132,7 +133,8 @@ static int edit_field(WINDOW *w, int y, int x, int width,
         wmove(w, y, x + pos);
         wrefresh(w);
         ch = wgetch(w);
-        if (ch == '\n' || ch == KEY_ENTER || ch == '\t' || ch == 27) {
+        if (ch == '\n' || ch == KEY_ENTER || ch == '\t' || ch == 27 ||
+            ch == KEY_UP || ch == KEY_DOWN || ch == KEY_BTAB) {
             break;
         }
         if ((ch == KEY_BACKSPACE || ch == 8 || ch == 127) && pos > 0) {
@@ -222,16 +224,24 @@ static int pkg_dialog(int add_mode, const char *root, package_t *pkg)
     for (;;) {
         int j;
         for (j = 0; j < nf; j++) {
-            mvwprintw(dlg, 2 + j * 2, 2, "%s:", labels[j]);
+            int fy = 2 + j * 2;
+            mvwprintw(dlg, fy, 2, "%s:", labels[j]);
+            mvwhline(dlg, fy, 14, ' ', w - 18);
+            mvwprintw(dlg, fy, 14, "%.*s", w - 18, values[j]);
         }
         mvwprintw(dlg, h - 1, 2,
-                  " Enter Next/Save  Tab Next  Esc Cancel ");
+                  " Enter Next/Save  Tab/Arrows Move  Esc Cancel ");
         ch = edit_field(dlg, 2 + i * 2, 14, w - 18, values[i], caps[i]);
         if (ch == 27) {
             rc = DLG_CANCEL;
             break;
         }
-        if (ch == '\t' || (ch == '\n' && i < nf - 1)) {
+        if (ch == KEY_UP || ch == KEY_BTAB) {
+            i = (i + nf - 1) % nf;
+            continue;
+        }
+        if (ch == '\t' || ch == KEY_DOWN ||
+            ((ch == '\n' || ch == KEY_ENTER) && i < nf - 1)) {
             i = (i + 1) % nf;
             continue;
         }
@@ -379,7 +389,12 @@ static void do_delete(package_t *p, const char *root)
     mvwprintw(w, 6, 2, "Type DELETE to confirm:");
     confirm[0] = '\0';
     wrefresh(w);
-    edit_field(w, 7, 4, 20, confirm, sizeof confirm);
+    for (;;) {
+        ch = edit_field(w, 7, 4, 20, confirm, sizeof confirm);
+        if (ch != KEY_UP && ch != KEY_DOWN && ch != KEY_BTAB) {
+            break;
+        }
+    }
     delwin(w);
     touchwin(stdscr);
     refresh();
